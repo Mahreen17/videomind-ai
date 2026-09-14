@@ -4,6 +4,8 @@ openai
 python-dotenv
 chromadb
 sentence-transformers
+torch
+torchvision
 numpy
 pandas
 reportlab>=4.2.0
