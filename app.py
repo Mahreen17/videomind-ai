@@ -12,6 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from rag_pipeline import RAGPipeline
+from transcript_loader import parse_uploaded_transcript, register_uploaded_transcript
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -317,6 +318,12 @@ with tab1:
         key="video_url_input"
     )
 
+    uploaded_file = st.file_uploader(
+        "Or upload a transcript (.txt or .vtt)",
+        type=["txt", "vtt"],
+        key="transcript_file"
+    )
+
     st.info(
         "Good test videos include educational videos, TED Talks, "
         "and videos with English captions."
@@ -328,8 +335,8 @@ with tab1:
         key="process_btn"
     ):
 
-        if not video_url.strip():
-            st.error("Please enter a YouTube URL.")
+        if not video_url.strip() and uploaded_file is None:
+            st.error("Enter a YouTube URL or upload a transcript file.")
 
         else:
 
@@ -340,7 +347,16 @@ with tab1:
                 status_text.text("Loading transcript...")
                 progress_bar.progress(20)
 
-                result = pipeline.process_video(video_url)
+                if uploaded_file is not None:
+                    transcript_text = parse_uploaded_transcript(
+                        uploaded_file.name, uploaded_file.getvalue()
+                    )
+                    if not transcript_text:
+                        raise ValueError("The uploaded transcript is empty.")
+                    register_uploaded_transcript("uploaded123", transcript_text)
+                    result = pipeline.process_video("uploaded123")
+                else:
+                    result = pipeline.process_video(video_url)
 
                 progress_bar.progress(100)
 
