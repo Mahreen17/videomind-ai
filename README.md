@@ -2,6 +2,8 @@
 
 An AI-powered Retrieval-Augmented Generation (RAG) learning assistant that transforms YouTube video transcripts and uploaded caption files into searchable educational knowledge. VideoMind AI uses semantic retrieval and Groq-powered language generation to provide contextual answers, summaries, and structured study notes through an interactive Streamlit dashboard.
 
+### Live demo : "https://videomind-ai-m1707.streamlit.app/"
+
 ## Dashboard Overview
 
 ![VideoMind AI Dashboard](dashboard.png)
