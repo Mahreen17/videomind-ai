@@ -414,9 +414,7 @@ This project demonstrates:
 
 GitHub: https://github.com/Mahreen17
 
-## License
 
-This project is provided as-is for educational and portfolio purposes. Please refer to the LICENSE file for detailed licensing information.
 
 ## Repository
 
