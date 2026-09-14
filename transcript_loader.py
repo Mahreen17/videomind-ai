@@ -1,147 +1,134 @@
-"""
-Handles extraction of transcripts from YouTube videos, Shorts, and playlists.
-"""
-
 import re
-from typing import Optional, List, Dict
+from urllib.parse import urlparse, parse_qs
 
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import (
-    TranscriptsDisabled,
-    NoTranscriptFound
-)
 
 
 class TranscriptLoader:
-    """Extract and manage YouTube transcripts."""
 
     @staticmethod
-    def extract_video_id(url: str) -> Optional[str]:
+    def extract_video_id(video_url):
         """
-        Extract video ID from various YouTube URL formats.
-
-        Handles:
-        - https://www.youtube.com/watch?v=VIDEO_ID
-        - https://youtu.be/VIDEO_ID
-        - https://www.youtube.com/shorts/VIDEO_ID
+        Extract YouTube video ID from different YouTube URL formats.
         """
 
-        patterns = [
-            r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([A-Za-z0-9_-]+)'
-        ]
+        if not video_url or not isinstance(video_url, str):
+            raise ValueError("Please provide a valid YouTube URL.")
 
-        for pattern in patterns:
-            match = re.search(pattern, url)
+        video_url = video_url.strip()
 
-            if match:
-                return match.group(1)
+        # Direct video ID
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_url):
+            return video_url
 
-        return None
+        parsed_url = urlparse(video_url)
+        hostname = parsed_url.netloc.lower().replace("www.", "")
+        path = parsed_url.path.strip("/")
+
+        # Standard YouTube URL
+        if hostname in ["youtube.com", "m.youtube.com"]:
+            if parsed_url.path == "/watch":
+                video_id = parse_qs(
+                    parsed_url.query
+                ).get("v", [None])[0]
+
+                if video_id:
+                    return video_id[:11]
+
+            # Shorts URL
+            if path.startswith("shorts/"):
+                video_id = path.split("/")[1]
+                return video_id[:11]
+
+            # Embed URL
+            if path.startswith("embed/"):
+                video_id = path.split("/")[1]
+                return video_id[:11]
+
+        # youtu.be URL
+        if hostname == "youtu.be":
+            video_id = path.split("/")[0]
+            return video_id[:11]
+
+        raise ValueError(
+            "Invalid YouTube URL."
+        )
 
     @staticmethod
-    def get_transcript(
-        video_id: str,
-        language: str = 'en'
-    ) -> Optional[str]:
+    def get_transcript(video_url):
         """
-        Retrieve transcript for a single video.
-
-        Args:
-            video_id: YouTube video ID
-            language: Language code (default: 'en' for English)
-
-        Returns:
-            Concatenated transcript text, or None if unavailable.
+        Fetch transcript using the latest youtube-transcript-api.
         """
 
         try:
-            # Fetch transcript list for the video
-            transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
+            video_id = TranscriptLoader.extract_video_id(video_url)
 
-            # Try to get transcript in requested language
-            try:
-                transcript = transcripts.find_transcript([language])
+            print(f"Extracted video ID: {video_id}")
 
-            except NoTranscriptFound:
-                # Fallback to English transcript
-                transcript = transcripts.find_transcript(['en'])
+            api = YouTubeTranscriptApi()
 
-            # Extract text from transcript entries
-            transcript_text = ' '.join(
-                [entry['text'] for entry in transcript.fetch()]
+            transcript = api.fetch(
+                video_id,
+                languages=["en", "hi"]
             )
 
-            return transcript_text
-
-        except TranscriptsDisabled:
-            raise Exception(
-                f"Transcripts are disabled for video {video_id}"
+            transcript_text = " ".join(
+                snippet.text for snippet in transcript
             )
 
-        except NoTranscriptFound:
-            raise Exception(
-                f"No transcript found for video {video_id} "
-                f"in language '{language}'"
-            )
-
-        except Exception as e:
-            raise Exception(
-                f"Error fetching transcript: {str(e)}"
-            )
-
-    @staticmethod
-    def process_url(url: str) -> Dict[str, Optional[str]]:
-        """
-        Process a single YouTube URL and return transcript.
-
-        Returns:
-            Dictionary with keys:
-            'status', 'video_id', 'transcript', 'error'
-        """
-
-        video_id = TranscriptLoader.extract_video_id(url)
-
-        if not video_id:
-            return {
-                'status': 'error',
-                'video_id': None,
-                'transcript': None,
-                'error': 'Invalid YouTube URL'
-            }
-
-        try:
-            transcript = TranscriptLoader.get_transcript(video_id)
+            if not transcript_text.strip():
+                raise ValueError("The transcript is empty.")
 
             return {
-                'status': 'success',
-                'video_id': video_id,
-                'transcript': transcript,
-                'error': None
+                "video_id": video_id,
+                "text": transcript_text,
+                "language": getattr(transcript, "language", "unknown"),
+                "language_code": getattr(
+                    transcript,
+                    "language_code",
+                    "unknown"
+                )
             }
 
         except Exception as e:
-            return {
-                'status': 'error',
-                'video_id': video_id,
-                'transcript': None,
-                'error': str(e)
-            }
+            error_message = str(e)
+
+            if "Subtitles are disabled" in error_message:
+                raise Exception(
+                    "This video does not have an accessible transcript. "
+                    "Please try another video with captions enabled."
+                )
+
+            if "Could not retrieve a transcript" in error_message:
+                raise Exception(
+                    "A transcript could not be retrieved for this video. "
+                    "The video may not have captions, or YouTube may be "
+                    "temporarily blocking transcript requests."
+                )
+
+            raise Exception(
+                f"Error fetching transcript: {error_message}"
+            )
 
 
-# Testing (for development only)
-if __name__ == '__main__':
+if __name__ == "__main__":
 
-    # Example: Try to fetch a transcript
-    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    test_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 
-    result = TranscriptLoader.process_url(test_url)
+    try:
+        video_id = TranscriptLoader.extract_video_id(test_url)
 
-    print("Status:", result['status'])
-    print("Video ID:", result['video_id'])
+        print("Extracted video ID:", video_id)
 
-    if result['status'] == 'success':
-        print("Transcript preview:")
-        print(result['transcript'][:500])
+        result = TranscriptLoader.get_transcript(test_url)
 
-    else:
-        print("Error:", result['error'])
+        print("\nTranscript fetched successfully.")
+        print("Video ID:", result["video_id"])
+        print("Language:", result["language"])
+        print("Transcript length:", len(result["text"]))
+
+        print("\nFirst 300 characters:")
+        print(result["text"][:300])
+
+    except Exception as e:
+        print("Error:", e)

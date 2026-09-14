@@ -1,280 +1,265 @@
-"""
-Vector store management using ChromaDB.
-"""
+import os
+from typing import Any, Dict, List, Optional
+
+# Disable Chroma telemetry before importing chromadb
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 import chromadb
-import os
-from typing import List, Dict
+from sentence_transformers import SentenceTransformer
 
 
 class VectorStore:
-    """Manage embeddings storage and retrieval with ChromaDB."""
-
-    def __init__(self, db_path: str = 'data/chromadb'):
+    def __init__(
+        self,
+        persist_directory: str = "data/chroma_db",
+        collection_name: str = "video_transcripts",
+    ):
         """
-        Initialize ChromaDB.
+        Initialize the ChromaDB vector store.
 
         Args:
-            db_path: Path to store ChromaDB files locally.
-
-        Note:
-            ChromaDB creates a persistent database on disk.
-            Data persists between runs.
+            persist_directory: Folder where ChromaDB stores its data.
+            collection_name: Name of the ChromaDB collection.
         """
 
-        os.makedirs(db_path, exist_ok=True)
+        self.persist_directory = persist_directory
+        self.collection_name = collection_name
 
-        # Initialize persistent ChromaDB client
+        # Create the directory if it does not exist
+        os.makedirs(self.persist_directory, exist_ok=True)
+
+        # Initialize ChromaDB persistent client
         self.client = chromadb.PersistentClient(
-            path=db_path
+            path=self.persist_directory
         )
 
-        self.db_path = db_path
-
-        print(f"ChromaDB initialized at: {db_path}")
-
-    def create_collection(self, collection_name: str):
-        """
-        Create or get a collection for a specific video or playlist.
-
-        Args:
-            collection_name: Unique collection name.
-
-        Returns:
-            ChromaDB collection object.
-        """
-
-        collection = self.client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"}
+        # Get or create collection
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"},
         )
 
-        return collection
+        # Load embedding model
+        print("Loading embedding model...")
+        self.embedding_model = SentenceTransformer(
+            "all-MiniLM-L6-v2"
+        )
+
+        print(
+            f"Vector store initialized. "
+            f"Collection: {self.collection_name}"
+        )
 
     def add_chunks(
         self,
-        collection_name: str,
-        chunks: List[Dict],
-        embeddings: List[List[float]]
+        chunks: List[Dict[str, Any]],
+        embeddings: Optional[List[List[float]]] = None,
+        video_id: Optional[str] = None,
     ) -> None:
         """
-        Store chunks and their embeddings in ChromaDB.
+        Add transcript chunks and embeddings to ChromaDB.
 
         Args:
-            collection_name: Name of the collection.
-            chunks: List of chunk dictionaries.
-            embeddings: List of embedding vectors.
-
-        Example chunk:
-            {
-                'chunk_id': 0,
-                'text': 'The video talks about...',
-                'start_word_idx': 0
-            }
+            chunks: List of transcript chunk dictionaries.
+            embeddings: Optional pre-generated embeddings.
+            video_id: YouTube video ID used as metadata.
         """
 
-        if len(chunks) != len(embeddings):
-            raise ValueError(
-                "Number of chunks and embeddings must be the same."
+        if not chunks:
+            print("No chunks to add.")
+            return
+
+        # Generate embeddings if they were not provided
+        if embeddings is None:
+            texts = [chunk["text"] for chunk in chunks]
+            embeddings = self.embedding_model.encode(
+                texts,
+                show_progress_bar=False,
+            ).tolist()
+
+        ids = []
+        documents = []
+        metadatas = []
+
+        for index, chunk in enumerate(chunks):
+            chunk_id = chunk.get(
+                "chunk_id",
+                f"{video_id or 'video'}_chunk_{index}",
             )
 
-        collection = self.create_collection(collection_name)
+            ids.append(str(chunk_id))
+            documents.append(chunk["text"])
 
-        # Prepare data for ChromaDB
-        ids = [
-            f"{collection_name}_chunk_{chunk['chunk_id']}"
-            for chunk in chunks
-        ]
-
-        texts = [
-            chunk['text']
-            for chunk in chunks
-        ]
-
-        metadatas = [
-            {
-                'chunk_id': str(chunk['chunk_id']),
-                'collection': collection_name,
-                'start_word_idx': str(
-                    chunk.get('start_word_idx', 0)
-                )
+            metadata = {
+                "chunk_id": str(chunk_id),
+                "video_id": video_id or "",
+                "start_word_idx": chunk.get("start_word_idx", 0),
+                "end_word_idx": chunk.get("end_word_idx", 0),
             }
-            for chunk in chunks
-        ]
 
-        # Upsert instead of add to avoid duplicate ID errors
-        collection.upsert(
+            metadatas.append(metadata)
+
+        # Upsert avoids duplicate-ID errors when the same video is processed again
+        self.collection.upsert(
             ids=ids,
             embeddings=embeddings,
-            documents=texts,
-            metadatas=metadatas
+            documents=documents,
+            metadatas=metadatas,
         )
 
-        print(
-            f"Added {len(chunks)} chunks to collection "
-            f"'{collection_name}'"
-        )
+        print(f"Added {len(chunks)} chunks to vector store.")
 
     def query(
         self,
-        collection_name: str,
-        query_embedding: List[float],
-        top_k: int = 5
-    ) -> List[Dict]:
+        query_embedding: Optional[List[float]] = None,
+        query_embeddings: Optional[List[List[float]]] = None,
+        n_results: int = 5,
+        video_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Retrieve the most similar chunks.
+        Search for similar transcript chunks.
+
+        Supports both query_embedding and query_embeddings so it works
+        with different versions of the RAG pipeline.
 
         Args:
-            collection_name: Collection to search.
-            query_embedding: Embedding vector for the question.
-            top_k: Number of results to return.
+            query_embedding: Single embedding vector.
+            query_embeddings: Alternative parameter name for embeddings.
+            n_results: Number of chunks to retrieve.
+            video_id: Optional video ID filter.
 
         Returns:
-            List of dictionaries containing chunk information.
+            ChromaDB query results.
         """
 
-        try:
-            collection = self.client.get_collection(
-                name=collection_name
+        # Support both parameter names
+        if query_embedding is None:
+            query_embedding = query_embeddings
+
+        if query_embedding is None:
+            raise ValueError(
+                "An embedding must be provided using "
+                "'query_embedding' or 'query_embeddings'."
             )
 
-        except Exception:
-            print(
-                f"Collection '{collection_name}' does not exist."
-            )
-            return []
+        # If a nested list is provided, extract the first embedding
+        if (
+            isinstance(query_embedding, list)
+            and len(query_embedding) > 0
+            and isinstance(query_embedding[0], list)
+        ):
+            query_embedding = query_embedding[0]
 
-        # Prevent requesting more results than available chunks
-        total_chunks = collection.count()
-        top_k = min(top_k, total_chunks)
+        # Convert NumPy arrays to normal Python lists
+        if hasattr(query_embedding, "tolist"):
+            query_embedding = query_embedding.tolist()
 
-        if top_k == 0:
-            return []
+        # Do not pass an invalid empty filter to ChromaDB
+        where = None
 
-        # Query ChromaDB
-        results = collection.query(
+        if video_id:
+            where = {"video_id": video_id}
+
+        results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=top_k
+            n_results=n_results,
+            where=where,
         )
 
-        # Format results
-        retrieved = []
+        return results
 
-        if results['documents'] and results['documents'][0]:
-
-            for i, doc in enumerate(results['documents'][0]):
-
-                retrieved.append({
-                    'chunk_id': results['metadatas'][0][i]['chunk_id'],
-                    'text': doc,
-                    'distance': results['distances'][0][i]
-                })
-
-        return retrieved
-
-    def delete_collection(self, collection_name: str) -> None:
+    def delete_video(self, video_id: str) -> None:
         """
-        Delete a collection.
+        Delete all transcript chunks belonging to a video.
 
-        Useful for cleanup or re-processing videos.
+        Args:
+            video_id: YouTube video ID.
         """
 
-        try:
-            self.client.delete_collection(
-                name=collection_name
-            )
+        results = self.collection.get(
+            where={"video_id": video_id}
+        )
 
+        ids = results.get("ids", [])
+
+        if ids:
+            self.collection.delete(ids=ids)
             print(
-                f"Deleted collection '{collection_name}'"
+                f"Deleted {len(ids)} chunks for video: {video_id}"
+            )
+        else:
+            print(
+                f"No chunks found for video: {video_id}"
             )
 
-        except Exception as e:
-            print(f"Error deleting collection: {e}")
-
-    def list_collections(self) -> List[str]:
+    def get_collection_count(self) -> int:
         """
-        List all stored collections.
+        Return the total number of stored transcript chunks.
         """
 
-        collections = self.client.list_collections()
-
-        return [
-            collection.name
-            for collection in collections
-        ]
+        return self.collection.count()
 
 
-# Testing
-if __name__ == '__main__':
+if __name__ == "__main__":
+    print("\nTesting VectorStore...\n")
 
-    from embeddings import EmbeddingsGenerator
+    vector_store = VectorStore()
 
-    print("=" * 50)
-    print("Testing Vector Store")
-    print("=" * 50)
+    test_video_id = "test_video"
 
-    # Initialize vector store and embeddings generator
-    vs = VectorStore(db_path='data/chromadb')
-    gen = EmbeddingsGenerator()
+    # Remove old test data to avoid duplicate IDs
+    vector_store.delete_video(test_video_id)
 
-    # Test sample chunks
-    sample_chunks = [
+    test_chunks = [
         {
-            'chunk_id': 0,
-            'text': 'Machine learning is a subset of AI that learns from data.'
+            "chunk_id": f"{test_video_id}_chunk_0",
+            "text": (
+                "Artificial intelligence is a field of computer science "
+                "that focuses on creating intelligent machines."
+            ),
+            "start_word_idx": 0,
+            "end_word_idx": 15,
         },
         {
-            'chunk_id': 1,
-            'text': 'Deep learning uses neural networks with multiple layers.'
-        },
-        {
-            'chunk_id': 2,
-            'text': 'Natural language processing helps computers understand human language.'
+            "chunk_id": f"{test_video_id}_chunk_1",
+            "text": (
+                "Machine learning allows computers to learn patterns "
+                "from data without explicit programming."
+            ),
+            "start_word_idx": 16,
+            "end_word_idx": 30,
         },
     ]
 
-    # Generate embeddings
-    chunk_texts = [
-        chunk['text']
-        for chunk in sample_chunks
-    ]
-
-    print("\nGenerating embeddings...")
-
-    embeddings = gen.embed_chunks(chunk_texts)
-
-    # Store embeddings in ChromaDB
-    collection_name = "test_video"
-
-    vs.add_chunks(
-        collection_name,
-        sample_chunks,
-        embeddings
+    # Add test chunks
+    vector_store.add_chunks(
+        chunks=test_chunks,
+        video_id=test_video_id,
     )
 
-    # Test query
-    question = "What is machine learning?"
-
-    print(f"\nQuery: '{question}'")
-
-    question_embedding = gen.embed_text(question)
-
-    results = vs.query(
-        collection_name,
-        question_embedding,
-        top_k=2
+    print(
+        "Total chunks in collection:",
+        vector_store.get_collection_count(),
     )
 
-    print("\nRetrieved chunks:")
+    # Generate embedding for a test query
+    query_text = "What is machine learning?"
 
-    for result in results:
+    query_embedding = vector_store.embedding_model.encode(
+        query_text
+    ).tolist()
 
-        print(
-            f"  - Chunk {result['chunk_id']}: "
-            f"{result['text'][:60]}... "
-            f"(distance: {result['distance']:.3f})"
-        )
+    # Test similarity search
+    results = vector_store.query(
+        query_embedding=query_embedding,
+        n_results=2,
+        video_id=test_video_id,
+    )
 
-    print("\n" + "=" * 50)
-    print("Test completed successfully!")
-    print("=" * 50)
+    print("\nRetrieved results:")
+
+    for index, document in enumerate(results["documents"][0]):
+        print(f"\nResult {index + 1}:")
+        print(document)
+
+    print("\nVectorStore test completed successfully.")

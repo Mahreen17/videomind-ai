@@ -1,5 +1,10 @@
 """
-LLM client for communicating with FreeLLMAPI gateway.
+LLM Client for VideoMind AI.
+
+Uses Groq's OpenAI-compatible API to generate:
+- Answers to questions
+- Video summaries
+- Study notes
 """
 
 import os
@@ -9,252 +14,232 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 
+# Load environment variables from .env
 load_dotenv()
 
 
 class LLMClient:
-    """Interface to FreeLLMAPI for LLM queries."""
+    """Handles communication between VideoMind AI and Groq."""
 
     def __init__(self):
-        self.base_url = os.getenv(
-            "FREELLMAPI_BASE_URL",
-            "http://localhost:3001/v1"
-        )
+        self.api_key = os.getenv("GROQ_API_KEY")
 
-        self.api_key = os.getenv(
-            "FREELLMAPI_API_KEY",
-            "freellmapi-your-unified-key"
+        self.base_url = os.getenv(
+            "LLM_BASE_URL",
+            "https://api.groq.com/openai/v1"
         )
 
         self.model = os.getenv(
-            "FREELLMAPI_MODEL",
-            "auto"
+            "LLM_MODEL",
+            "openai/gpt-oss-20b"
         )
 
-        self.client = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key
-        )
-
-        print("LLM Client initialized:")
-        print(f"  Base URL: {self.base_url}")
-        print(f"  Model: {self.model}")
-
-    def _generate_response(
-        self,
-        messages: list,
-        max_tokens: int,
-        temperature: float = 0.3
-    ) -> Optional[str]:
-        """Send a request to FreeLLMAPI."""
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
+        if not self.api_key:
+            raise ValueError(
+                "GROQ_API_KEY is missing. "
+                "Please add your Groq API key to the .env file."
             )
 
-            if not response.choices:
-                print("Error: No response choices returned.")
-                return None
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url
+        )
 
-            answer = response.choices[0].message.content
+    @staticmethod
+    def limit_text(text: str, max_chars: int = 16000) -> str:
+        """
+        Limit the amount of text sent to Groq.
 
-            if not answer:
-                print("Error: Empty response received.")
-                return None
+        This helps prevent token-limit errors when processing
+        long YouTube transcripts.
+        """
 
-            return answer.strip()
+        if not text:
+            return ""
 
-        except Exception as e:
-            print(f"Error calling FreeLLMAPI: {e}")
-            return None
+        text = str(text)
+
+        if len(text) <= max_chars:
+            return text
+
+        return (
+            text[:max_chars]
+            + "\n\n"
+            "[Transcript shortened automatically because of API limits.]"
+        )
+
+    def generate_response(
+        self,
+        prompt: str,
+        max_tokens: int = 1000,
+        temperature: float = 0.2
+    ) -> str:
+        """
+        Send a prompt to Groq and return the generated response.
+        """
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are VideoMind AI, a helpful educational assistant. "
+                        "Provide accurate, clear, concise, and well-structured "
+                        "answers based on the available video content."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+
+        return response.choices[0].message.content or ""
 
     def answer_question(
         self,
-        context: str,
         question: str,
-        max_tokens: int = 300
-    ) -> Optional[str]:
-        """Answer a question using transcript context."""
+        context: str,
+        transcript: Optional[str] = None
+    ) -> str:
+        """
+        Answer a user question using retrieved transcript context.
+        """
 
-        if not context.strip():
-            print("Error: Transcript context is empty.")
-            return None
-
-        if not question.strip():
-            print("Error: Question is empty.")
-            return None
+        context = self.limit_text(context, 12000)
+        transcript_text = self.limit_text(transcript or "", 4000)
 
         prompt = f"""
-You are a helpful assistant that answers questions about video content.
-
-Use only the information available in the transcript context below.
-
-If the answer is not available in the context, respond exactly with:
-
-"I don't have information about that in the video transcript."
-
-Do not use outside knowledge.
-
-Transcript Context:
-{context}
+Answer the user's question using the provided video context.
 
 Question:
 {question}
 
-Answer:
+Retrieved Context:
+{context}
+
+Additional Transcript Context:
+{transcript_text}
+
+Instructions:
+- Answer directly and clearly.
+- Use information supported by the provided context.
+- Do not invent facts.
+- If the answer is not available, say that it is not clearly covered.
+- Use headings or bullet points when useful.
 """
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Answer questions only using the provided transcript "
-                    "context. Do not invent information."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
+        return self.generate_response(
+            prompt,
+            max_tokens=900
+        )
 
-        return self._generate_response(
-            messages,
-            max_tokens,
-            temperature=0.3
+    def summarize(
+        self,
+        context: str = "",
+        transcript: Optional[str] = None
+    ) -> str:
+        """
+        Generate a concise summary of the video transcript.
+        """
+
+        text = transcript or context
+        text = self.limit_text(text, 16000)
+
+        prompt = f"""
+Create a clear and well-structured summary of the following video transcript.
+
+Use Markdown formatting with headings and bullet points.
+
+Follow this structure:
+
+# Summary
+
+## Overview
+
+## Main Topics
+
+## Key Takeaways
+
+Keep the explanation concise, accurate, and easy to study.
+
+Transcript:
+{text}
+"""
+
+        return self.generate_response(
+            prompt,
+            max_tokens=1100
         )
 
     def generate_summary(
         self,
-        context: str,
-        max_tokens: int = 500
-    ) -> Optional[str]:
-        """Generate a concise summary of transcript content."""
+        context: str = "",
+        transcript: Optional[str] = None
+    ) -> str:
+        """
+        Compatibility method used by rag_pipeline.py.
+        """
 
-        if not context.strip():
-            print("Error: Transcript context is empty.")
-            return None
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Summarize the transcript accurately and concisely. "
-                    "Use only the information provided."
-                )
-            },
-            {
-                "role": "user",
-                "content": f"Summarize this transcript:\n\n{context}"
-            }
-        ]
-
-        return self._generate_response(
-            messages,
-            max_tokens,
-            temperature=0.3
+        return self.summarize(
+            context=context,
+            transcript=transcript
         )
 
     def generate_study_notes(
         self,
-        context: str,
-        max_tokens: int = 800
-    ) -> Optional[str]:
-        """Generate structured study notes from transcript content."""
+        context: str = "",
+        transcript: Optional[str] = None
+    ) -> str:
+        """
+        Generate structured Markdown study notes.
+        """
 
-        if not context.strip():
-            print("Error: Transcript context is empty.")
-            return None
+        text = transcript or context
+        text = self.limit_text(text, 16000)
 
         prompt = f"""
-Create structured study notes from the following video transcript.
+Create well-organized study notes from the following video transcript.
 
-Use this format:
+Return Markdown that can be displayed directly in Streamlit.
 
-Key Points:
-- Important points from the transcript
+Use:
+- Clear headings
+- Bold important terms
+- Bullet points
+- Numbered lists where appropriate
+- Short paragraphs
+- Simple explanations
 
-Important Concepts:
-- Concept: Definition
+Follow this structure:
 
-Examples:
-- Examples mentioned in the transcript
+# Study Notes
 
-Summary:
-A short overall summary.
+## Overview
 
-Only use information from the transcript.
+## Main Topics
+
+## Key Concepts
+
+## Important Points
+
+## Possible Interview or Exam Questions
+
+## Final Takeaways
+
+Do not include unnecessary introductions.
+
+Make the notes useful for revision and easy to read.
 
 Transcript:
-{context}
+{text}
 """
 
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Create accurate and well-organized study notes "
-                    "using only the provided transcript."
-                )
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-
-        return self._generate_response(
-            messages,
-            max_tokens,
-            temperature=0.3
+        return self.generate_response(
+            prompt,
+            max_tokens=1400
         )
-
-
-if __name__ == "__main__":
-
-    print("=" * 50)
-    print("Testing LLM Client")
-    print("=" * 50)
-
-    client = LLMClient()
-
-    test_context = """
-Machine learning is a subset of artificial intelligence that enables
-systems to learn from data. Instead of being explicitly programmed,
-machine learning systems use algorithms to identify patterns in data.
-
-There are three main types of machine learning:
-supervised learning, unsupervised learning, and reinforcement learning.
-"""
-
-    print("\n--- Testing Question Answering ---")
-
-    question = "What is machine learning?"
-
-    answer = client.answer_question(
-        context=test_context,
-        question=question
-    )
-
-    print(f"Q: {question}")
-    print(f"A: {answer}")
-
-    print("\n--- Testing Summary Generation ---")
-
-    summary = client.generate_summary(test_context)
-
-    print(f"Summary:\n{summary}")
-
-    print("\n--- Testing Study Notes Generation ---")
-
-    notes = client.generate_study_notes(test_context)
-
-    print(f"Notes:\n{notes}")
-
-    print("\n" + "=" * 50)
-    print("Test completed successfully!")
-    print("=" * 50)
