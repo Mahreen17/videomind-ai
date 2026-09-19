@@ -4,6 +4,8 @@ An AI-powered Retrieval-Augmented Generation (RAG) learning assistant that trans
 
 ### Live demo : "https://videomind-ai-m1707.streamlit.app/"
 
+#### Demo video : "https://drive.google.com/file/d/1eRSEKmTYvkioLD3JbSM5Ax59UOjJ_Tuv/view?usp=sharing"
+
 ## Dashboard Overview
 
 ![VideoMind AI Dashboard](dashboard.png)
